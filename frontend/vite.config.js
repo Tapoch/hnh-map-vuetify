@@ -1,0 +1,34 @@
+import {defineConfig} from 'vite'
+import vue from '@vitejs/plugin-vue'
+import vuetify from 'vite-plugin-vuetify'
+import path from 'path'
+
+export default defineConfig({
+  base: '/map/',
+  plugins: [
+    vue(),
+    vuetify({autoImport: true})
+  ],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+    },
+  },
+  server: {
+    port: 5173,
+    proxy: {
+      '/map/api': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/map/grids': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/map/updates': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+    },
+  }
+})

@@ -1,6 +1,17 @@
-import Vue from 'vue';
-import Vuetify from 'vuetify/lib/framework';
+import 'vuetify/styles'
+import {createVuetify as createVuetifyCore} from 'vuetify'
+import {aliases, mdi} from 'vuetify/iconsets/mdi-svg'
+import * as components from 'vuetify/components'
+import * as directives from 'vuetify/directives'
 
-Vue.use(Vuetify);
-
-export default new Vuetify({});
+export function createVuetify() {
+    return createVuetifyCore({
+        components,
+        directives,
+        icons: {
+            defaultSet: 'mdi',
+            aliases,
+            sets: {mdi}
+        }
+    })
+}

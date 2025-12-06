@@ -1,61 +1,26 @@
-import '@babel/polyfill'
-
-import Vue from 'vue'
+import {createApp} from 'vue'
 import App from './App.vue'
-import VueResource from "vue-resource"
-import VModal from 'vue-js-modal'
 import router from './router'
-import {HnHMaxZoom} from "./utils/LeafletCustomTypes";
-import {Server} from "miragejs";
-import vuetify from './plugins/vuetify';
+import {createVuetify} from './plugins/vuetify'
+import axios from 'axios'
+import './assets/main.css'
 
 export const API_ENDPOINT = `api`;
 
-export function getTileUrl(x, y, zoom) {
-    return `grids/${HnHMaxZoom - zoom}/${x}_${y}.png`
+if (import.meta.env.MODE === 'development') {
+    // Start mocks before app creation to avoid hitting proxy/back-end during initial fetches
+    const {startDevMocks} = await import('./mocks/devMocks')
+    startDevMocks()
 }
 
-Vue.config.productionTip = false;
+const app = createApp(App)
 
-if (process.env.NODE_ENV === 'development') {
-    new Server({
-        routes() {
-            this.namespace = 'map/' + API_ENDPOINT;
-            this.get("v1/characters", () => {
-                    return []
-                }
-            );
-            this.get("v1/markers", () => {
-                    return [{
-                        "name": "test",
-                        "id": 150,
-                        "map": 2,
-                        "position": {"x": 100, "y": -100},
-                        "image": "gfx/terobjs/mm/custom",
-                        "hidden": false
-                    }]
-                }
-            );
-            this.get("maps/", () => {
-                    return {
-                        "2": {"ID": 2, "Name": "MAIN", "Hidden": false, "Priority": true},
-                        "5": {"ID": 5, "Name": "LEVEL 2", "Hidden": false, "Priority": true}
-                    }
-                }
-            );
-            this.get("config/", () => {
-                    return {"title": "map", "auths": ["map", "markers", "point", "g1", "g2", "g3", "g4", "g5", "upload", "writer", "admin"]}
-                }
-            );
-        }
-    });
-}
+const http = axios.create({
+    baseURL: '/map/'
+});
 
-Vue.use(VueResource);
-Vue.use(VModal)
+app.config.globalProperties.$http = http;
 
-new Vue({
-    router,
-    vuetify,
-    render: h => h(App)
-}).$mount('#app');
+app.use(router)
+app.use(createVuetify())
+app.mount('#app')

@@ -1,5 +1,35 @@
 import L, {Bounds, LatLng, Point, Util, Browser} from "leaflet"
 
+const mockTileCache = {};
+
+const isDev = import.meta.env.MODE === 'development';
+
+function isDevMockEnabled() {
+    return isDev && typeof window !== 'undefined' && window.__HNH_MOCK_TILES__;
+}
+
+function mockTileDataUrl(map, x, y, z) {
+    const key = `${map}:${x}:${y}:${z}`;
+    if (mockTileCache[key]) {
+        return mockTileCache[key];
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    const ctx = canvas.getContext('2d');
+    const hue = (map * 37 + x * 13 + y * 17 + z * 23) % 360;
+    ctx.fillStyle = `hsl(${hue}, 45%, 75%)`;
+    ctx.fillRect(0, 0, 100, 100);
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.strokeRect(0, 0, 100, 100);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.font = '10px sans-serif';
+    ctx.fillText(`${map}:${z}`, 6, 14);
+    ctx.fillText(`${x},${y}`, 6, 28);
+    mockTileCache[key] = canvas.toDataURL('image/png');
+    return mockTileCache[key];
+}
+
 export const SmartTileLayer = L.TileLayer.extend({
     cache: {},
     invalidTile: "",
@@ -27,6 +57,10 @@ export const SmartTileLayer = L.TileLayer.extend({
         }
 
         data['cache'] = this.cache[data['map'] + ':' + data['x'] + ':' + data['y'] + ':' + data['z']];
+
+        if (isDevMockEnabled()) {
+            return mockTileDataUrl(data['map'], data['x'], data['y'], data['z']);
+        }
 
         if (!data['cache'] || data['cache'] === -1) {
             return this.invalidTile;
