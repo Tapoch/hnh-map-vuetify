@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -39,6 +41,7 @@ type Session struct {
 
 var (
 	gridStorage = flag.String("grids", "grids", "directory to store grids in")
+	debugLog    = flag.Bool("debug", envBool("HNHMAP_DEBUG", false), "enable verbose logging to troubleshoot map creation and uploads")
 	port        = flag.Int("port", func() int {
 		if port, ok := os.LookupEnv("HNHMAP_PORT"); ok {
 			p, err := strconv.Atoi(port)
@@ -51,12 +54,83 @@ var (
 	}(), "Port to listen on")
 )
 
+func envBool(env string, def bool) bool {
+	if v, ok := os.LookupEnv(env); ok {
+		b, err := strconv.ParseBool(v)
+		if err == nil {
+			return b
+		}
+	}
+	return def
+}
+
+func debugf(format string, args ...interface{}) {
+	if *debugLog {
+		log.Printf(format, args...)
+	}
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+	lrw.status = code
+	lrw.ResponseWriter.WriteHeader(code)
+}
+
+func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
+	if lrw.status == 0 {
+		lrw.status = http.StatusOK
+	}
+	n, err := lrw.ResponseWriter.Write(b)
+	lrw.bytes += n
+	return n, err
+}
+
+// Flush delegates to the underlying ResponseWriter if it supports it.
+func (lrw *loggingResponseWriter) Flush() {
+	if f, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack delegates to the underlying ResponseWriter if it supports it, needed for WebSocket/SSE compatibility.
+func (lrw *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := lrw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("hijacker not supported")
+	}
+	return h.Hijack()
+}
+
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lrw := &loggingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(lrw, r)
+		if lrw.status == 0 {
+			lrw.status = http.StatusOK
+		}
+		debugf("request method=%s path=%s status=%d bytes=%d duration=%s", r.Method, r.URL.Path, lrw.status, lrw.bytes, time.Since(start))
+	})
+}
+
 func faviconHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "public/favicon.ico")
 }
 
 func main() {
 	flag.Parse()
+
+	// Make log output more helpful while debugging map creation issues.
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	if *debugLog {
+		log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
+		log.Println("Debug logging enabled")
+	}
 
 	db, err := bbolt.Open(*gridStorage+"/grids.db", 0600, nil)
 	if err != nil {
@@ -136,7 +210,8 @@ func main() {
 	http.Handle("/js/", http.FileServer(http.Dir("public")))
 
 	log.Printf("Listening on port %d", *port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
+	handler := logRequests(http.DefaultServeMux)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), handler))
 }
 
 type Character struct {

@@ -289,7 +289,16 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "Error decoding request", http.StatusBadRequest)
 		return
 	}
-	log.Println(grup)
+	totalGrids := 0
+	for _, row := range grup.Grids {
+		totalGrids += len(row)
+	}
+	debugf("gridUpdate: received grids=%d rows=%d cols(first row)=%d", totalGrids, len(grup.Grids), func() int {
+		if len(grup.Grids) == 0 {
+			return 0
+		}
+		return len(grup.Grids[0])
+	}())
 
 	ops := []struct {
 		mapid int
@@ -346,7 +355,7 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 			if err != nil {
 				return err
 			}
-			log.Println("Client made mapid ", seq)
+			debugf("gridUpdate: created new map id=%d hidden=%t (defaultHide set=%t)", seq, mi.Hidden, configb.Get([]byte("defaultHide")) != nil)
 			for x, row := range grup.Grids {
 				for y, grid := range row {
 
@@ -387,7 +396,7 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 			}
 		}
 
-		log.Println("Client in mapid ", mapid)
+		debugf("gridUpdate: using map id=%d offset=%+v candidates=%d", mapid, offset, len(maps))
 
 		for x, row := range grup.Grids {
 			for y, grid := range row {
@@ -467,7 +476,7 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 				continue
 			}
 			mapB.Delete([]byte(strconv.Itoa(mergeid)))
-			log.Println("Reporting merge", mergeid, mapid)
+			debugf("gridUpdate: merging map %d into %d with offset %+v (chosen offset %+v)", mergeid, mapid, merge, offset)
 			m.reportMerge(mergeid, mapid, Coord{X: offset.X - merge.X, Y: offset.Y - merge.Y})
 		}
 		return nil
@@ -489,7 +498,7 @@ func (m *Map) gridUpdate(rw http.ResponseWriter, req *http.Request) {
 			needProcess[zoomproc{p.c.Parent(), p.m}] = struct{}{}
 		}
 	}
-	log.Println(greq)
+	debugf("gridUpdate response: map=%d coords=%+v requested=%d", greq.Map, greq.Coords, len(greq.GridRequests))
 	json.NewEncoder(rw).Encode(greq)
 }
 
@@ -647,15 +656,23 @@ func (m *Map) gridUpload(rw http.ResponseWriter, req *http.Request) {
 		return nil
 	})
 
+	debugf("gridUpload: grid=%s map=%d coord=%+v updateTile=%t nextUpdate=%s", id, mapid, cur.Coord, updateTile, cur.NextUpdate.Format(time.RFC3339))
+
 	if updateTile {
-		os.MkdirAll(fmt.Sprintf("%s/grids", m.gridStorage), 0600)
+		gridDir := fmt.Sprintf("%s/grids", m.gridStorage)
+		if err := os.MkdirAll(gridDir, 0755); err != nil {
+			debugf("gridUpload: failed to mkdir %s: %v", gridDir, err)
+			return
+		}
 		f, err := os.Create(fmt.Sprintf("%s/grids/%s.png", m.gridStorage, cur.ID))
 		if err != nil {
+			debugf("gridUpload: failed to create tile file: %v", err)
 			return
 		}
 		_, err = io.Copy(f, file)
 		if err != nil {
 			f.Close()
+			debugf("gridUpload: failed to copy tile data: %v", err)
 			return
 		}
 		f.Close()
@@ -667,6 +684,9 @@ func (m *Map) gridUpload(rw http.ResponseWriter, req *http.Request) {
 			c = c.Parent()
 			m.updateZoomLevel(mapid, c, z)
 		}
+		debugf("gridUpload: stored tile grid=%s map=%d coord=%+v", id, mapid, cur.Coord)
+	} else {
+		debugf("gridUpload: skipped writing tile grid=%s map=%d coord=%+v (NextUpdate not reached)", id, mapid, cur.Coord)
 	}
 }
 
@@ -682,28 +702,40 @@ func (m *Map) updateZoomLevel(mapid int, c Coord, z int) {
 			subC.Y += y
 			td := m.GetTile(mapid, subC, z-1)
 			if td == nil || td.File == "" {
+				debugf("updateZoomLevel: missing sub-tile map=%d zoom=%d coord=%+v", mapid, z-1, subC)
 				continue
 			}
 			subf, err := os.Open(filepath.Join(m.gridStorage, td.File))
 			if err != nil {
+				debugf("updateZoomLevel: failed to open sub-tile %s: %v", td.File, err)
 				continue
 			}
 			subimg, _, err := image.Decode(subf)
 			subf.Close()
 			if err != nil {
+				debugf("updateZoomLevel: failed to decode sub-tile %s: %v", td.File, err)
 				continue
 			}
 			draw.BiLinear.Scale(img, image.Rect(50*x, 50*y, 50*x+50, 50*y+50), subimg, subimg.Bounds(), draw.Src, nil)
 		}
 	}
-	os.MkdirAll(fmt.Sprintf("%s/%d/%d", m.gridStorage, mapid, z), 0600)
+	zoomDir := fmt.Sprintf("%s/%d/%d", m.gridStorage, mapid, z)
+	if err := os.MkdirAll(zoomDir, 0755); err != nil {
+		debugf("updateZoomLevel: failed to mkdir %s: %v", zoomDir, err)
+		return
+	}
 	f, err := os.Create(fmt.Sprintf("%s/%d/%d/%s.png", m.gridStorage, mapid, z, c.Name()))
 	m.SaveTile(mapid, c, z, fmt.Sprintf("%d/%d/%s.png", mapid, z, c.Name()), time.Now().UnixNano())
 	if err != nil {
+		debugf("updateZoomLevel: failed to create zoom tile: %v", err)
 		return
 	}
 	defer func() {
 		f.Close()
 	}()
-	png.Encode(f, img)
+	if err := png.Encode(f, img); err != nil {
+		debugf("updateZoomLevel: failed to encode zoom tile: %v", err)
+		return
+	}
+	debugf("updateZoomLevel: wrote zoom tile map=%d zoom=%d coord=%+v", mapid, z, c)
 }

@@ -71,6 +71,7 @@ func (m *Map) SaveTile(mapid int, c Coord, z int, f string, t int64) {
 			return err
 		}
 		m.gridUpdates.send(td)
+		debugf("save tile map=%d coord=%+v zoom=%d file=%s cache=%d", mapid, c, z, f, t)
 		return zoom.Put([]byte(c.Name()), raw)
 	})
 	return
@@ -233,11 +234,16 @@ func (m *Map) gridTile(rw http.ResponseWriter, req *http.Request) {
 	td := m.GetTile(mapid, Coord{X: x, Y: y}, z)
 
 	if td == nil {
+		debugf("gridTile: missing tile map=%d coord=%d_%d zoom=%d", mapid, x, y, z)
 		http.Error(rw, "file not found", 404)
 		return
 	}
 
 	rw.Header().Set("Cache-Control", "private immutable")
 
-	http.ServeFile(rw, req, filepath.Join(m.gridStorage, td.File))
+	path := filepath.Join(m.gridStorage, td.File)
+	if *debugLog {
+		debugf("gridTile: serving %s", path)
+	}
+	http.ServeFile(rw, req, path)
 }
