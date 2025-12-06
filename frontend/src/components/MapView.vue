@@ -3,6 +3,7 @@
     <v-navigation-drawer
       v-model="drawer"
       :rail="mini"
+      :width="mini ? 72 : 320"
       :theme="drawerTheme"
       app
       style="z-index: 1000"
@@ -138,7 +139,7 @@
 
     <v-main>
       <v-container>
-        <div ref="map" class="map"></div>
+        <div ref="mapContainer" class="map"></div>
         <div class="control-panel card"></div>
 
         <ContextMenu ref="menu" v-slot="{ data }">
@@ -197,871 +198,660 @@
   </div>
 </template>
 
-<script>
+<script setup>
+import {ref, reactive, computed, watch, onMounted, onBeforeUnmount, getCurrentInstance} from "vue";
+import {useRoute, useRouter} from "vue-router";
 import {
   GridCoordLayer,
   HnHCRS,
   HnHMaxZoom,
   HnHMinZoom,
   TileSize,
-} from "../utils/LeafletCustomTypes";
-import { SmartTileLayer } from "../utils/SmartTileLayer";
+} from "../utils/leaflet-custom-types";
+import { SmartTileLayer } from "../utils/smart-tile-layer";
 import * as L from "leaflet";
 import { API_ENDPOINT } from "../main";
-import { Marker } from "../data/Marker";
-import { UniqueList } from "../data/UniqueList";
-import { Character } from "../data/Character";
+import { Marker } from "../data/marker";
+import { UniqueList } from "../data/unique-list";
+import { Character } from "../data/character";
 import ContextMenu from "./ContextMenu.vue";
 
-export default {
-  name: "MapView",
-  components: {
-    ContextMenu,
-  },
-    data: function () {
-      return {
-        drawer: true,
-        mini: true,
-        isDarkTheme: false,
-      themeMedia: null,
-      themePreference: "auto",
-      showGridCoordinates: false,
-      showMarkers: false,
-      showQuests: false,
-      showQuestTooltips: false,
-      showThingwalls: true,
-      showThingwallTooltips: true,
-      showPlayers: true,
-      showPlayerTooltips: true,
-      expandControlPanel: true,
+const drawer = ref(true);
+const mini = ref(false);
+const isDarkTheme = ref(false);
+const themeMedia = ref(null);
+const themePreference = ref("auto");
 
-      trackingCharacterId: -1,
-      autoMode: false,
-      polling: null,
-      zz: false,
-      // markersCache: [],
-      allMarks: [],
-      otherMarks: [],
-      marksCategories: [],
-      thingMarks: [],
-      questMarks: [],
-      players: [],
-      maps: [],
-      selectedMap: null,
-      selectedMarker: null,
-      selectedQuest: null,
-      selectedThing: null,
-      selectedPlayer: null,
-      overlayMap: null,
-      auths: [],
-      mapid: 0,
-      coordSetFrom: { x: 0, y: 0 },
-        coordSet: {
-          x: 0,
-          y: 0,
-        },
-        iconScale: 1,
-        coordDialog: false,
-      };
-    },
-  computed: {
-    iconScaleLabel() {
-      return this.iconScale.toFixed(1);
-    },
-    drawerTheme() {
-      return this.isDarkTheme ? "dark" : "light";
-    },
-  },
-  watch: {
-    showGridCoordinates(value) {
-      console.log("showGridCoordinates", value);
-      if (value) {
-        this.coordLayer.setOpacity(1);
-      } else {
-        this.coordLayer.setOpacity(0);
+const showGridCoordinates = ref(false);
+const showMarkers = ref(false);
+const showQuests = ref(false);
+const showQuestTooltips = ref(false);
+const showThingwalls = ref(true);
+const showThingwallTooltips = ref(true);
+const showPlayers = ref(true);
+const showPlayerTooltips = ref(true);
+
+const trackingCharacterId = ref(-1);
+const autoMode = ref(false);
+
+const otherMarks = ref([]);
+const thingMarks = ref([]);
+const questMarks = ref([]);
+const players = ref([]);
+const maps = ref([]);
+const selectedMap = ref(null);
+const selectedMarker = ref(null);
+const selectedQuest = ref(null);
+const selectedThing = ref(null);
+const selectedPlayer = ref(null);
+const overlayMap = ref(null);
+const auths = ref([]);
+const mapid = ref(0);
+const coordSetFrom = reactive({ x: 0, y: 0 });
+const coordSet = reactive({ x: 0, y: 0 });
+const iconScale = ref(1);
+const coordDialog = ref(false);
+
+const mapContainer = ref(null);
+const mapRef = ref(null);
+const layerRef = ref(null);
+const overlayLayerRef = ref(null);
+const coordLayerRef = ref(null);
+const markerLayerRef = ref(null);
+const sourceRef = ref(null);
+const markers = ref(new UniqueList());
+const characters = ref(new UniqueList());
+const intervalId = ref(null);
+
+const router = useRouter();
+const route = useRoute();
+const { proxy } = getCurrentInstance();
+const http = proxy.$http;
+
+const menu = ref(null);
+const markermenu = ref(null);
+
+const iconScaleLabel = computed(() => iconScale.value.toFixed(1));
+const drawerTheme = computed(() => (isDarkTheme.value ? "dark" : "light"));
+
+function mapviewCtx() {
+  return {
+    map: mapRef.value,
+    markerLayer: markerLayerRef.value,
+    iconScale: iconScale.value,
+  };
+}
+
+function currentOverlayMapId() {
+  return overlayLayerRef.value ? overlayLayerRef.value.map : -1;
+}
+
+function shouldShowOnCurrentMaps(item) {
+  const overlayId = currentOverlayMapId();
+  return (
+    item.map === mapid.value ||
+    (overlayId !== -1 && item.map === overlayId)
+  );
+}
+
+function renderMarks(listRef, enabled, tooltipState) {
+  if (!mapRef.value) return;
+
+  listRef.value.forEach((it) => it.remove(mapviewCtx()));
+  if (!enabled) return;
+
+  listRef.value
+    .filter((it) => shouldShowOnCurrentMaps(it))
+    .forEach((it) => {
+      it.add(mapviewCtx());
+      if (typeof tooltipState !== "undefined") {
+        it.tooltip(tooltipState);
       }
+    });
+}
+
+function renderCharacters(enabled) {
+  if (!mapRef.value) return;
+
+  characters.value.getElements().forEach((it) => it.remove({ map: mapRef.value }));
+  if (!enabled) return;
+
+  characters.value
+    .getElements()
+    .filter((it) => shouldShowOnCurrentMaps(it))
+    .forEach((it) => {
+      it.add({ map: mapRef.value });
+      it.tooltip(showPlayerTooltips.value);
+    });
+}
+
+function loadIconScale() {
+  if (typeof localStorage === "undefined") return 1;
+  const raw = localStorage.getItem("map_icon_scale");
+  const parsed = parseFloat(raw);
+  if (!isNaN(parsed) && isFinite(parsed)) {
+    return Math.min(3, Math.max(0.5, parsed));
+  }
+  return 1;
+}
+
+function persistIconScale(value) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem("map_icon_scale", value);
+}
+
+function loadThemePreference() {
+  if (typeof localStorage === "undefined") return "auto";
+  const pref = localStorage.getItem("map_theme_pref");
+  if (pref === "dark" || pref === "light") return pref;
+  return "auto";
+}
+
+function persistThemePreference(pref) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem("map_theme_pref", pref);
+}
+
+function handleThemeChange(e) {
+  if (themePreference.value === "auto") {
+    isDarkTheme.value = e.matches;
+  }
+}
+
+function toggleTheme() {
+  themePreference.value = isDarkTheme.value ? "dark" : "light";
+  persistThemePreference(themePreference.value);
+}
+
+function refreshMarkerIcons() {
+  if (!mapRef.value || !overlayLayerRef.value) return;
+  renderMarks(otherMarks, showMarkers.value);
+  renderMarks(thingMarks, showThingwalls.value, showThingwallTooltips.value);
+  renderMarks(questMarks, showQuests.value, showQuestTooltips.value);
+}
+
+function processConfig(config) {
+  document.title = config.title;
+  auths.value = config.auths;
+}
+
+function toLatLng(x, y) {
+  return mapRef.value.unproject([x, y], HnHMaxZoom);
+}
+
+function zoomOut() {
+  trackingCharacterId.value = -1;
+  mapRef.value.setView([0, 0], HnHMinZoom);
+}
+
+function wipeTile(data) {
+  http.get(`${API_ENDPOINT}/admin/wipeTile`, {
+    params: { ...data.coords, map: mapid.value },
+  });
+}
+
+function hideMarker(data) {
+  http.get(`${API_ENDPOINT}/admin/hideMarker`, {
+    params: { id: data.id },
+  });
+  markers.value.byId(data.id)?.remove(mapviewCtx());
+}
+
+function queryCoordSet(data) {
+  coordSetFrom.x = data.coords.x;
+  coordSetFrom.y = data.coords.y;
+  coordDialog.value = true;
+}
+
+function setCoords() {
+  http.get(`${API_ENDPOINT}/admin/setCoords`, {
+    params: {
+      map: mapid.value,
+      fx: coordSetFrom.x,
+      fy: coordSetFrom.y,
+      tx: coordSet.x,
+      ty: coordSet.y,
     },
-    showMarkers(value) {
-      console.log("showMarkers", value);
-      if (!value) {
-        this.otherMarks.forEach((it) => it.remove(this));
-      } else {
-        this.otherMarks
-          .filter(
-            (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-          )
-          .forEach((it) => it.add(this));
+  });
+  coordDialog.value = false;
+}
+
+function changeMap(mapId) {
+  if (mapId === mapid.value) return;
+  mapid.value = mapId;
+  layerRef.value.map = mapid.value;
+  layerRef.value.redraw();
+  overlayLayerRef.value.map = -1;
+  overlayLayerRef.value.redraw();
+  renderMarks(otherMarks, showMarkers.value);
+  renderMarks(thingMarks, showThingwalls.value, showThingwallTooltips.value);
+  renderMarks(questMarks, showQuests.value, showQuestTooltips.value);
+  renderCharacters(showPlayers.value);
+}
+
+function updateMarkers(markersData) {
+  markers.value.update(
+    markersData.map((it) => {
+      let m = new Marker(it);
+      if (m.type === "thingwall") m.tstate = showThingwallTooltips.value;
+      else if (m.type === "quest") m.tstate = showQuestTooltips.value;
+      else m.tstate = false;
+      return m;
+    }),
+    (marker) => {
+      if (marker.map === mapid.value || marker.map === overlayLayerRef.value.map) {
+        marker.add(mapviewCtx());
       }
-    },
-    showThingwalls(value) {
-      console.log("showThingwalls", value);
-      if (!value) {
-        this.thingMarks.forEach((it) => it.remove(this));
-      } else {
-        this.thingMarks
-          .filter(
-            (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-          )
-          .forEach((it) => {
-            it.add(this);
-            it.tooltip(this.showThingwallTooltips);
+      marker.setClickCallback(() => {
+        mapRef.value.setView(marker.marker.getLatLng(), mapRef.value.getZoom());
+      });
+      marker.setContextMenu((mev) => {
+        if (auths.value.includes("admin") || auths.value.includes("writer")) {
+          markermenu.value?.open(mev.originalEvent, {
+            name: marker.name,
+            id: marker.id,
           });
-      }
-    },
-    showQuests(value) {
-      console.log("showQuests", value);
-      if (!value) {
-        this.questMarks.forEach((it) => it.remove(this));
-      } else {
-        this.questMarks
-          .filter(
-            (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-          )
-          .forEach((it) => {
-            it.add(this);
-            it.tooltip(this.showQuestTooltips);
-          });
-      }
-    },
-    showPlayers(value) {
-      console.log("showPlayers", value);
-      if (!value) {
-        this.characters.getElements().forEach((it) => it.remove(this));
-      } else {
-        this.characters
-          .getElements()
-          .filter(
-            (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-          )
-          .forEach((it) => {
-            it.add(this);
-            it.tooltip(this.showPlayers);
-          });
-      }
-    },
-    showThingwallTooltips(value) {
-      console.log("showThingwallTooltips", value);
-      this.thingMarks.forEach((it) => it.tooltip(value));
-    },
-    showQuestTooltips(value) {
-      console.log("showQuestTooltips", value);
-      this.questMarks.forEach((it) => it.tooltip(value));
-    },
-    showPlayerTooltips(value) {
-      console.log("showPlayerTooltips", value);
-      this.characters.getElements().forEach((it) => it.tooltip(value));
-    },
-    trackingCharacterId(value) {
-      if (value !== -1) {
-        let character = this.characters.byId(value);
-        if (character) {
-          this.changeMap(character.map);
-          let latlng = this.map.unproject(
-            [character.position.x, character.position.y],
-            HnHMaxZoom
-          );
-          this.map.setView(
-            latlng,
-            HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
-          );
-
-          this.$router.push({ path: `/character/${value}` });
-          this.autoMode = true;
-        } else {
-          this.map.setView([0, 0], HnHMinZoom);
-          let mapid = this.maps[0].ID;
-          this.$router.replace({ path: `/grid/${mapid}/0/0/${HnHMinZoom}` });
-          this.trackingCharacterId = -1;
         }
-      }
+      });
     },
-    iconScale(value) {
-      this.persistIconScale(value);
-      this.refreshMarkerIcons();
+    (marker) => {
+      marker.remove(mapviewCtx());
     },
-    selectedMap(value) {
-      console.log("selectedMap", value);
-      if (value) {
-        this.changeMap(value.ID);
-        let zoom = this.map.getZoom();
-        this.map.setView([0, 0], zoom);
-
-        this.$router.replace({ path: `/grid/${this.mapid}/0/0/${zoom}` });
-        this.trackingCharacterId = -1;
-      }
-    },
-    overlayMap(value) {
-      console.log("overlayMap");
-      if (value) {
-        this.overlayLayer.map = value.ID;
-        this.overlayLayer.redraw();
-        if (this.showMarkers) {
-          this.otherMarks.forEach((it) => it.remove(this));
-          this.otherMarks
-            .filter(
-              (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-            )
-            .forEach((it) => it.add(this));
-        }
-        if (this.showThingwalls) {
-          this.thingMarks.forEach((it) => it.remove(this));
-          this.thingMarks
-            .filter(
-              (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-            )
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showThingwallTooltips);
-            });
-        }
-        if (this.showQuests) {
-          this.questMarks.forEach((it) => it.remove(this));
-          this.questMarks
-            .filter(
-              (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-            )
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showQuestTooltips);
-            });
-        }
-        if (this.showPlayers) {
-          this.characters.getElements().forEach((it) => it.remove(this));
-          this.characters
-            .getElements()
-            .filter(
-              (it) => it.map === this.mapid || it.map === this.overlayLayer.map
-            )
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showPlayerTooltips);
-            });
-        }
-      } else {
-        this.overlayLayer.map = -1;
-        this.overlayLayer.redraw();
-        if (this.showMarkers) {
-          this.otherMarks.forEach((it) => it.remove(this));
-          this.otherMarks
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => it.add(this));
-        }
-        if (this.showThingwalls) {
-          this.thingMarks.forEach((it) => it.remove(this));
-          this.thingMarks
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showThingwallTooltips);
-            });
-        }
-        if (this.showQuests) {
-          this.questMarks.forEach((it) => it.remove(this));
-          this.questMarks
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showPlayerTooltips);
-            });
-        }
-        if (this.showPlayers) {
-          this.characters.getElements().forEach((it) => it.remove(this));
-          this.characters
-            .getElements()
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showPlayerTooltips);
-            });
-        }
-      }
-    },
-    selectedMarker(value) {
-      //selectedMap
-      console.log("selectedMarker", value);
-      if (value) {
-        let markerMapId = value.map;
-
-        this.maps.forEach((map) => {
-          if (markerMapId === map.ID) {
-            this.selectedMap = map;
-
-            if (this.mapid !== map.ID) this.changeMap(map.ID);
-
-            this.map.setView(
-              value.marker.getLatLng(),
-              HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
-            );
-            this.trackingCharacterId = -1;
-            return;
-          }
-        });
-      }
-    },
-    selectedQuest(value) {
-      //selectedMap
-      console.log("selectedQuest", value);
-      if (value) {
-        let markerMapId = value.map;
-
-        this.maps.forEach((map) => {
-          if (markerMapId === map.ID) {
-            this.selectedMap = map;
-
-            if (this.mapid !== map.ID) this.changeMap(map.ID);
-
-            this.map.setView(
-              value.marker.getLatLng(),
-              HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
-            );
-            this.trackingCharacterId = -1;
-            return;
-          }
-        });
-      }
-    },
-    selectedThing(value) {
-      //selectedMap
-      console.log("selectedThing", value);
-      if (value) {
-        let markerMapId = value.map;
-
-        this.maps.forEach((map) => {
-          if (markerMapId === map.ID) {
-            this.selectedMap = map;
-
-            if (this.mapid !== map.ID) this.changeMap(map.ID);
-
-            this.map.setView(
-              value.marker.getLatLng(),
-              HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
-            );
-            this.trackingCharacterId = -1;
-            return;
-          }
-        });
-      }
-    },
-    selectedPlayer(value) {
-      if (value && value.id) {
-        this.trackingCharacterId = value.id;
-      }
-    },
-    overlayMap(value) {
-      if (!value) {
-        this.overlayLayer.map = -1;
-        this.overlayLayer.redraw();
-      }
-    },
-  },
-  created() {
-    this.iconScale = this.loadIconScale();
-    this.themePreference = this.loadThemePreference();
-    if (typeof window !== "undefined" && window.matchMedia) {
-      this.themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
-      if (this.themePreference === "auto") {
-        this.isDarkTheme = this.themeMedia.matches;
-      }
-      this.themeMedia.addEventListener("change", this.handleThemeChange);
+    (marker, updated) => {
+      marker.update(mapviewCtx(), updated);
     }
-  },
-  mounted() {
-    let chars = this.$http.get(`${API_ENDPOINT}/v1/characters`);
-    let maps = this.$http.get(`${API_ENDPOINT}/maps`);
+  );
 
-    Promise.all([chars, maps]).then(
-      (values) => {
-        this.setupMap(values[0].data, values[1].data);
+  otherMarks.value.length = 0;
+  thingMarks.value.length = 0;
+  questMarks.value.length = 0;
+  markers.value
+    .getElements()
+    .filter((it) => it.name != null && it.name.length > 0 && !it.hidden)
+    .sort((a, b) => {
+      let im = a.image.localeCompare(b.image);
+      return im === 0 ? a.name.localeCompare(b.name) : im;
+    })
+    .forEach((it) => {
+      if (it.type === "thingwall") thingMarks.value.push(it);
+      else if (it.type === "quest") questMarks.value.push(it);
+      else otherMarks.value.push(it);
+    });
+}
+
+function updateCharacters(charactersData) {
+  characters.value.update(
+    charactersData.map((it) => {
+      let ch = new Character(it);
+      ch.tstate = showPlayerTooltips.value;
+      return ch;
+    }),
+    (character) => {
+      character.add({ map: mapRef.value });
+      character.setClickCallback(() => {
+        trackingCharacterId.value = character.id;
+      });
+    },
+    (character) => {
+      character.remove({ map: mapRef.value });
+    },
+    (character, updated) => {
+      if (trackingCharacterId.value === updated.id) {
+        if (mapid.value !== updated.map) {
+          changeMap(updated.map);
+        }
+        let latlng = mapRef.value.unproject(
+          [updated.position.x, updated.position.y],
+          HnHMaxZoom
+        );
+        mapRef.value.setView(latlng, mapRef.value.getZoom());
+      }
+      character.update({ map: mapRef.value }, updated);
+    }
+  );
+  players.value.length = 0;
+  characters.value.getElements().forEach((it) => players.value.push(it));
+}
+
+function setupMap(charactersData, mapsData) {
+  http.get(`${API_ENDPOINT}/config`).then(
+    (response) => {
+      processConfig(response.data);
+    },
+    () => {}
+  );
+
+  mapRef.value = L.map(mapContainer.value, {
+    minZoom: HnHMinZoom,
+    maxZoom: HnHMaxZoom,
+    crs: HnHCRS,
+    attributionControl: false,
+    inertia: false,
+    zoomAnimation: false,
+    fadeAnimation: false,
+    markerZoomAnimation: false,
+  });
+
+  for (let id in mapsData) {
+    let m = mapsData[id];
+    m.text = m.Name;
+    m.value = m.ID;
+    maps.value.push(m);
+  }
+  maps.value.sort((a, b) => {
+    return a.size < b.size;
+  });
+
+  mapRef.value.on("drag", () => {
+    let point = mapRef.value.project(mapRef.value.getCenter(), mapRef.value.getZoom());
+    let coordinate = {
+      x: ~~(point.x / TileSize),
+      y: ~~(point.y / TileSize),
+      z: mapRef.value.getZoom(),
+    };
+    router.replace({
+      path: `/grid/${mapid.value}/${coordinate.x}/${coordinate.y}/${coordinate.z}`,
+    });
+    trackingCharacterId.value = -1;
+  });
+  mapRef.value.on("zoom", () => {
+    if (autoMode.value) {
+      autoMode.value = false;
+    } else {
+      let point = mapRef.value.project(mapRef.value.getCenter(), mapRef.value.getZoom());
+      let coordinate = {
+        x: Math.floor(point.x / TileSize),
+        y: Math.floor(point.y / TileSize),
+        z: mapRef.value.getZoom(),
+      };
+      router.replace({
+        path: `/grid/${mapid.value}/${coordinate.x}/${coordinate.y}/${coordinate.z}`,
+      });
+      trackingCharacterId.value = -1;
+    }
+  });
+
+  layerRef.value = new SmartTileLayer("grids/{map}/{z}/{x}_{y}.png?{cache}", {
+    minZoom: HnHMinZoom,
+    maxZoom: HnHMaxZoom,
+    zoomOffset: 0,
+    zoomReverse: true,
+    tileSize: TileSize,
+  });
+  layerRef.value.invalidTile =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  layerRef.value.addTo(mapRef.value);
+
+  overlayLayerRef.value = new SmartTileLayer("grids/{map}/{z}/{x}_{y}.png?{cache}", {
+    minZoom: HnHMinZoom,
+    maxZoom: HnHMaxZoom,
+    zoomOffset: 0,
+    zoomReverse: true,
+    tileSize: TileSize,
+    opacity: 0.6,
+  });
+  overlayLayerRef.value.invalidTile =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  overlayLayerRef.value.addTo(mapRef.value);
+
+  coordLayerRef.value = new GridCoordLayer({ tileSize: TileSize, opacity: 0 });
+  coordLayerRef.value.addTo(mapRef.value);
+
+  markerLayerRef.value = L.layerGroup();
+  markerLayerRef.value.addTo(mapRef.value);
+
+  mapRef.value.on("contextmenu", (mev) => {
+    if (auths.value.includes("admin") || auths.value.includes("writer")) {
+      let point = mapRef.value.project(mev.latlng, mapRef.value.getZoom());
+      let coords = {
+        x: Math.floor(point.x / TileSize),
+        y: Math.floor(point.y / TileSize),
+      };
+      menu.value?.open(mev.originalEvent, { coords });
+    }
+  });
+
+  sourceRef.value = new EventSource("updates");
+  sourceRef.value.onmessage = (event) => {
+    var updates = JSON.parse(event.data);
+    for (var update of updates) {
+      var key = update["M"] + ":" + update["X"] + ":" + update["Y"] + ":" + update["Z"];
+      layerRef.value.cache[key] = update["T"];
+      if (layerRef.value.map === update["M"]) {
+        layerRef.value.refresh(update["X"], update["Y"], update["Z"]);
+      }
+    }
+  };
+
+  sourceRef.value.addEventListener("merge", (e) => {
+    var merge = JSON.parse(e.data);
+    if (mapid.value === merge["From"]) {
+      let mapTo = merge["To"];
+      let point = mapRef.value.project(mapRef.value.getCenter(), mapRef.value.getZoom());
+      let coordinate = {
+        x: Math.floor(point.x / TileSize),
+        y: Math.floor(point.y / TileSize),
+        z: mapRef.value.getZoom(),
+      };
+      coordinate.x += merge["Shift"].x;
+      coordinate.y += merge["Shift"].y;
+      router.replace({
+        path: `/grid/${mapTo}/${coordinate.x}/${coordinate.y}/${coordinate.z}`,
+      });
+
+      let latLng = toLatLng(coordinate.x * 100, coordinate.y * 100);
+
+      changeMap(mapTo);
+      http.get(`${API_ENDPOINT}/v1/markers`).then(
+        (response) => {
+          updateMarkers(response.data);
+        },
+        () => {}
+      );
+      mapRef.value.setView(latLng, mapRef.value.getZoom());
+    }
+  });
+
+  updateCharacters(charactersData);
+
+  if (route.params.characterId) {
+    trackingCharacterId.value = +route.params.characterId;
+  } else if (route.params.gridX && route.params.gridY && route.params.zoom) {
+    let latLng = toLatLng(route.params.gridX * 100, route.params.gridY * 100);
+
+    if (mapid.value !== route.params.map) {
+      changeMap(route.params.map);
+    }
+
+    mapRef.value.setView(latLng, route.params.zoom);
+  } else {
+    if (maps.value.length > 0) {
+      changeMap(maps.value[0].ID);
+    }
+    mapRef.value.setView([0, 0], HnHMinZoom);
+  }
+
+  intervalId.value = setInterval(() => {
+    http.get(`${API_ENDPOINT}/v1/characters`).then(
+      (response) => {
+        updateCharacters(response.data);
       },
-      () => this.$emit("error")
+      () => {
+        clearInterval(intervalId.value);
+      }
     );
-  },
-  beforeUnmount: function () {
-    clearInterval(this.intervalId);
-    if (this.themeMedia && this.themeMedia.removeEventListener) {
-      this.themeMedia.removeEventListener("change", this.handleThemeChange);
+  }, 2000);
+
+  http.get(`${API_ENDPOINT}/v1/markers`).then(
+    (response) => {
+      updateMarkers(response.data);
+    },
+    () => {}
+  );
+}
+
+watch(showGridCoordinates, (value) => {
+  if (coordLayerRef.value) {
+    coordLayerRef.value.setOpacity(value ? 1 : 0);
+  }
+});
+
+watch(showMarkers, (value) => {
+  renderMarks(otherMarks, value);
+});
+
+watch(showThingwalls, (value) => {
+  renderMarks(thingMarks, value, showThingwallTooltips.value);
+});
+
+watch(showQuests, (value) => {
+  renderMarks(questMarks, value, showQuestTooltips.value);
+});
+
+watch(showPlayers, (value) => {
+  renderCharacters(value);
+});
+
+watch(showThingwallTooltips, (value) => {
+  thingMarks.value.forEach((it) => it.tooltip(value));
+});
+
+watch(showQuestTooltips, (value) => {
+  questMarks.value.forEach((it) => it.tooltip(value));
+});
+
+watch(showPlayerTooltips, (value) => {
+  characters.value.getElements().forEach((it) => it.tooltip(value));
+});
+
+watch(trackingCharacterId, (value) => {
+  if (value !== -1) {
+    let character = characters.value.byId(value);
+    if (character) {
+      changeMap(character.map);
+      let latlng = mapRef.value.unproject(
+        [character.position.x, character.position.y],
+        HnHMaxZoom
+      );
+      mapRef.value.setView(
+        latlng,
+        HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
+      );
+
+      router.push({ path: `/character/${value}` });
+      autoMode.value = true;
+    } else {
+      mapRef.value.setView([0, 0], HnHMinZoom);
+      let mapTarget = maps.value[0].ID;
+      router.replace({ path: `/grid/${mapTarget}/0/0/${HnHMinZoom}` });
+      trackingCharacterId.value = -1;
     }
-  },
-  methods: {
-    loadIconScale() {
-      if (typeof localStorage === "undefined") {
-        return 1;
-      }
-      const raw = localStorage.getItem("map_icon_scale");
-      const parsed = parseFloat(raw);
-      if (!isNaN(parsed) && isFinite(parsed)) {
-        return Math.min(3, Math.max(0.5, parsed));
-      }
-      return 1;
-    },
-    persistIconScale(value) {
-      if (typeof localStorage === "undefined") {
-        return;
-      }
-      localStorage.setItem("map_icon_scale", value);
-    },
-    refreshMarkerIcons() {
-      if (!this.map || !this.overlayLayer) {
-        return;
-      }
-      const refreshList = (list, enabled, tooltip) => {
-        list.forEach((it) => {
-          if (it.marker) {
-            it.remove(this);
-          }
-          if (
-            enabled &&
-            (it.map === this.mapid || it.map === this.overlayLayer.map)
-          ) {
-            it.add(this);
-            if (tooltip !== undefined) {
-              it.tooltip(tooltip);
-            }
-          }
-        });
-      };
-      refreshList(this.otherMarks, this.showMarkers);
-      refreshList(
-        this.thingMarks,
-        this.showThingwalls,
-        this.showThingwallTooltips
+  }
+});
+
+watch(selectedMap, (value) => {
+  if (value) {
+    changeMap(value.ID);
+    let zoom = mapRef.value.getZoom();
+    mapRef.value.setView([0, 0], zoom);
+    router.replace({
+      path: `/grid/${mapid.value}/0/0/${zoom}`,
+    });
+  }
+});
+
+watch(overlayMap, (value) => {
+  if (!overlayLayerRef.value) return;
+
+  overlayLayerRef.value.map = value ? value.ID : -1;
+  overlayLayerRef.value.redraw();
+
+  renderMarks(otherMarks, showMarkers.value);
+  renderMarks(thingMarks, showThingwalls.value, showThingwallTooltips.value);
+  renderMarks(questMarks, showQuests.value, showQuestTooltips.value);
+  renderCharacters(showPlayers.value);
+});
+
+watch(iconScale, (value) => {
+  persistIconScale(value);
+  refreshMarkerIcons();
+});
+
+watch(selectedQuest, (value) => {
+  if (!value) return;
+  let markerMapId = value.map;
+  maps.value.forEach((mapItem) => {
+    if (markerMapId === mapItem.ID) {
+      selectedMap.value = mapItem;
+
+      if (mapid.value !== mapItem.ID) changeMap(mapItem.ID);
+
+      mapRef.value.setView(
+        value.marker.getLatLng(),
+        HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
       );
-      refreshList(this.questMarks, this.showQuests, this.showQuestTooltips);
-    },
-    handleThemeChange(e) {
-      if (this.themePreference === "auto") {
-        this.isDarkTheme = e.matches;
-      }
-    },
-    loadThemePreference() {
-      if (typeof localStorage === "undefined") return "auto";
-      const pref = localStorage.getItem("map_theme_pref");
-      if (pref === "dark" || pref === "light") return pref;
-      return "auto";
-    },
-    persistThemePreference(pref) {
-      if (typeof localStorage === "undefined") return;
-      localStorage.setItem("map_theme_pref", pref);
-    },
-    toggleTheme() {
-      this.themePreference = this.isDarkTheme ? "dark" : "light";
-      this.persistThemePreference(this.themePreference);
-    },
-    setupMap(characters, maps) {
-      this.$http.get(`${API_ENDPOINT}/config`).then(
-        (response) => {
-          this.processConfig(response.data);
-        },
-        () => this.$emit("error")
+      trackingCharacterId.value = -1;
+      return;
+    }
+  });
+});
+
+watch(selectedThing, (value) => {
+  if (!value) return;
+  let markerMapId = value.map;
+  maps.value.forEach((mapItem) => {
+    if (markerMapId === mapItem.ID) {
+      selectedMap.value = mapItem;
+
+      if (mapid.value !== mapItem.ID) changeMap(mapItem.ID);
+
+      mapRef.value.setView(
+        value.marker.getLatLng(),
+        HnHMaxZoom - Math.floor(HnHMaxZoom - HnHMinZoom) / 2
       );
-      // Create map and layer
-      this.map = L.map(this.$refs.map, {
-        // Map setup
-        minZoom: HnHMinZoom,
-        maxZoom: HnHMaxZoom,
-        crs: HnHCRS,
+      trackingCharacterId.value = -1;
+      return;
+    }
+  });
+});
 
-        // Disable all visuals
-        attributionControl: false,
-        inertia: false,
-        zoomAnimation: false,
-        fadeAnimation: false,
-        markerZoomAnimation: false,
-      });
+watch(selectedPlayer, (value) => {
+  if (value && value.id) {
+    trackingCharacterId.value = value.id;
+  }
+});
 
-      for (let id in maps) {
-        let map = maps[id];
-        map.text = map.Name;
-        map.value = map.ID;
-        this.maps.push(map);
-      }
-      this.maps.sort((a, b) => {
-        return a.size < b.size;
-      });
+iconScale.value = loadIconScale();
+themePreference.value = loadThemePreference();
+if (typeof window !== "undefined" && window.matchMedia) {
+  themeMedia.value = window.matchMedia("(prefers-color-scheme: dark)");
+  if (themePreference.value === "auto") {
+    isDarkTheme.value = themeMedia.value.matches;
+  }
+  themeMedia.value.addEventListener("change", handleThemeChange);
+}
 
-      // Update url on manual drag, zoom
-      this.map.on("drag", () => {
-        let point = this.map.project(this.map.getCenter(), this.map.getZoom());
-        let coordinate = {
-          x: ~~(point.x / TileSize),
-          y: ~~(point.y / TileSize),
-          z: this.map.getZoom(),
-        };
-        this.$router.replace({
-          path: `/grid/${this.mapid}/${coordinate.x}/${coordinate.y}/${coordinate.z}`,
-        });
-        this.trackingCharacterId = -1;
-      });
-      this.map.on("zoom", () => {
-        if (this.autoMode) {
-          this.autoMode = false;
-        } else {
-          let point = this.map.project(
-            this.map.getCenter(),
-            this.map.getZoom()
-          );
-          let coordinate = {
-            x: Math.floor(point.x / TileSize),
-            y: Math.floor(point.y / TileSize),
-            z: this.map.getZoom(),
-          };
-          this.$router.replace({
-            path: `/grid/${this.mapid}/${coordinate.x}/${coordinate.y}/${coordinate.z}`,
-          });
-          this.trackingCharacterId = -1;
-        }
-      });
+onMounted(() => {
+  let chars = http.get(`${API_ENDPOINT}/v1/characters`);
+  let mapsReq = http.get(`${API_ENDPOINT}/maps`);
 
-      this.layer = new SmartTileLayer("grids/{map}/{z}/{x}_{y}.png?{cache}", {
-        minZoom: HnHMinZoom,
-        maxZoom: HnHMaxZoom,
-        zoomOffset: 0,
-        zoomReverse: true,
-        tileSize: TileSize,
-      });
-      this.layer.invalidTile =
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-      this.layer.addTo(this.map);
-
-      this.overlayLayer = new SmartTileLayer(
-        "grids/{map}/{z}/{x}_{y}.png?{cache}",
-        {
-          minZoom: HnHMinZoom,
-          maxZoom: HnHMaxZoom,
-          zoomOffset: 0,
-          zoomReverse: true,
-          tileSize: TileSize,
-          opacity: 0.6,
-        }
-      );
-      this.overlayLayer.invalidTile =
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
-      this.overlayLayer.addTo(this.map);
-
-      this.coordLayer = new GridCoordLayer({ tileSize: TileSize, opacity: 0 });
-      this.coordLayer.addTo(this.map);
-
-      this.markerLayer = L.layerGroup();
-      this.markerLayer.addTo(this.map);
-
-      /*this.map.on('mousemove', (mev) => {
-          coords = this.map.project(mev.latlng, this.map.getZoom());
-      })*/
-
-      this.map.on(
-        "contextmenu",
-        ((mev) => {
-          if (this.auths.includes("admin") || this.auths.includes("writer")) {
-            let point = this.map.project(mev.latlng, this.map.getZoom());
-            let coords = {
-              x: Math.floor(point.x / TileSize),
-              y: Math.floor(point.y / TileSize),
-            };
-            this.$refs.menu.open(mev.originalEvent, { coords: coords });
-          }
-        }).bind(this)
-      );
-
-      this.source = new EventSource("updates");
-      this.source.onmessage = function (event) {
-        var updates = JSON.parse(event.data);
-        for (var update of updates) {
-          var key =
-            update["M"] +
-            ":" +
-            update["X"] +
-            ":" +
-            update["Y"] +
-            ":" +
-            update["Z"];
-          this.layer.cache[key] = update["T"];
-          if (this.layer.map === update["M"]) {
-            this.layer.refresh(update["X"], update["Y"], update["Z"]);
-          }
-        }
-      }.bind(this);
-
-      this.source.addEventListener(
-        "merge",
-        ((e) => {
-          var merge = JSON.parse(e.data);
-          if (this.mapid === merge["From"]) {
-            let mapTo = merge["To"];
-            let point = this.map.project(
-              this.map.getCenter(),
-              this.map.getZoom()
-            );
-            let coordinate = {
-              x: Math.floor(point.x / TileSize),
-              y: Math.floor(point.y / TileSize),
-              z: this.map.getZoom(),
-            };
-            coordinate.x += merge["Shift"].x;
-            coordinate.y += merge["Shift"].y;
-            this.$router.replace({
-              path: `/grid/${mapTo}/${coordinate.x}/${coordinate.y}/${coordinate.z}`,
-            });
-
-            let latLng = this.toLatLng(coordinate.x * 100, coordinate.y * 100);
-
-            this.changeMap(mapTo);
-            this.$http.get(`${API_ENDPOINT}/v1/markers`).then(
-              (response) => {
-                this.updateMarkers(response.data);
-              },
-              () => {
-                this.$emit("error");
-              }
-            );
-            this.map.setView(latLng, this.map.getZoom());
-          }
-        }).bind(this)
-      );
-
-      this.markers = new UniqueList();
-      this.characters = new UniqueList();
-
-      // Create markers
-      this.updateCharacters(characters);
-
-      // Check parameters
-      if (this.$route.params.characterId) {
-        // Navigate to character
-        this.trackingCharacterId = +this.$route.params.characterId;
-      } else if (
-        this.$route.params.gridX &&
-        this.$route.params.gridY &&
-        this.$route.params.zoom
-      ) {
-        // Navigate to specific grid
-        let latLng = this.toLatLng(
-          this.$route.params.gridX * 100,
-          this.$route.params.gridY * 100
-        );
-
-        if (this.mapid !== this.$route.params.map) {
-          this.changeMap(this.$route.params.map);
-        }
-
-        this.map.setView(latLng, this.$route.params.zoom);
-      } else {
-        // Just show a map
-        if (this.maps.length > 0) {
-          this.changeMap(this.maps[0].ID);
-        }
-        this.map.setView([0, 0], HnHMinZoom);
-      }
-
-      this.intervalId = setInterval(() => {
-        this.$http.get(`${API_ENDPOINT}/v1/characters`).then(
-          (response) => {
-            this.updateCharacters(response.data);
-          },
-          () => {
-            clearInterval(this.intervalId);
-            this.$emit("error");
-          }
-        );
-      }, 2000);
-      // Request markers
-      this.$http.get(`${API_ENDPOINT}/v1/markers`).then(
-        (response) => {
-          this.updateMarkers(response.data);
-        },
-        () => {
-          this.$emit("error");
-        }
-      );
+  Promise.all([chars, mapsReq]).then(
+    (values) => {
+      setupMap(values[0].data, values[1].data);
     },
-    updateMarkers(markersData) {
-      this.markers.update(
-        markersData.map((it) => {
-          let m = new Marker(it);
-          if (m.type === "thingwall") m.tstate = this.showThingwallTooltips;
-          else if (m.type === "quest") m.tstate = this.showQuestTooltips;
-          else m.tstate = false;
-          return m;
-        }),
-        (marker) => {
-          // Add
-          if (
-            marker.map === this.mapid ||
-            marker.map === this.overlayLayer.map
-          ) {
-            marker.add(this);
-          }
-          marker.setClickCallback(() => {
-            this.map.setView(marker.marker.getLatLng(), this.map.getZoom());
-          });
-          marker.setContextMenu((mev) => {
-            if (this.auths.includes("admin") || this.auths.includes("writer")) {
-              this.$refs.markermenu.open(mev.originalEvent, {
-                name: marker.name,
-                id: marker.id,
-              });
-            }
-          });
-        },
-        (marker) => {
-          // Remove
-          marker.remove(this);
-        },
-        (marker, updated) => {
-          // Update
-          marker.update(this, updated);
-        }
-      );
-      // this.markersCache.length = 0;
-      // this.markers.getElements().forEach(it => this.markersCache.push(it));
-      /*this.markersCache.sort((a, b) => {
-        let im = a.image.localeCompare(b.image);
-        return im === 0 ? a.name.localeCompare(b.name) : im;
-      });*/
+    () => {}
+  );
+});
 
-      this.allMarks.length = 0;
-      this.otherMarks.length = 0;
-      this.thingMarks.length = 0;
-      this.questMarks.length = 0;
-      this.markers
-        .getElements()
-        .filter((it) => it.name != null && it.name.length > 0 && !it.hidden)
-        .sort((a, b) => {
-          let im = a.image.localeCompare(b.image);
-          return im === 0 ? a.name.localeCompare(b.name) : im;
-        })
-        .forEach((it) => {
-          this.allMarks.push(it);
-          if (it.type === "thingwall") this.thingMarks.push(it);
-          else if (it.type === "quest") this.questMarks.push(it);
-          else this.otherMarks.push(it);
-
-          if (!this.marksCategories.includes(it.type))
-            this.marksCategories.push(it.type);
-        });
-    },
-    updateCharacters(charactersData) {
-      this.characters.update(
-        charactersData.map((it) => {
-          let ch = new Character(it);
-          ch.tstate = this.showPlayerTooltips;
-          return ch;
-        }),
-        (character) => {
-          // Add
-          character.add(this);
-          character.setClickCallback(() => {
-            // Zoom to character on marker click
-            this.trackingCharacterId = character.id;
-          });
-        },
-        (character) => {
-          // Remove
-          character.remove(this);
-        },
-        (character, updated) => {
-          // Update
-          if (this.trackingCharacterId === updated.id) {
-            if (this.mapid !== updated.map) {
-              this.changeMap(updated.map);
-            }
-            let latlng = this.map.unproject(
-              [updated.position.x, updated.position.y],
-              HnHMaxZoom
-            );
-            this.map.setView(latlng, this.map.getZoom());
-          }
-          character.update(this, updated);
-        }
-      );
-      this.players.length = 0;
-      this.characters.getElements().forEach((it) => this.players.push(it));
-    },
-    processConfig(config) {
-      document.title = config.title;
-      this.auths = config.auths;
-    },
-    toLatLng(x, y) {
-      return this.map.unproject([x, y], HnHMaxZoom);
-    },
-    zoomOut() {
-      this.trackingCharacterId = -1;
-      this.map.setView([0, 0], HnHMinZoom);
-    },
-    wipeTile(data) {
-      this.$http.get(`${API_ENDPOINT}/admin/wipeTile`, {
-        params: { ...data.coords, map: this.mapid },
-      });
-    },
-    hideMarker(data) {
-      this.$http.get(`${API_ENDPOINT}/admin/hideMarker`, {
-        params: { id: data.id },
-      });
-      this.markers.byId(data.id).remove(this);
-    },
-    queryCoordSet(data) {
-      this.coordSetFrom = data.coords;
-      this.coordDialog = true;
-    },
-    setCoords() {
-      this.$http.get(`${API_ENDPOINT}/admin/setCoords`, {
-        params: {
-          map: this.mapid,
-          fx: this.coordSetFrom.x,
-          fy: this.coordSetFrom.y,
-          tx: this.coordSet.x,
-          ty: this.coordSet.y,
-        },
-      });
-      this.coordDialog = false;
-    },
-    changeMap(mapid) {
-      if (mapid !== this.mapid) {
-        this.mapid = mapid;
-        this.layer.map = this.mapid;
-        this.layer.redraw();
-        this.overlayLayer.map = -1;
-        this.overlayLayer.redraw();
-        if (this.showMarkers) {
-          this.otherMarks.forEach((it) => it.remove(this));
-          this.otherMarks
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(false);
-            });
-        }
-        if (this.showThingwalls) {
-          this.thingMarks.forEach((it) => it.remove(this));
-          this.thingMarks
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showThingwallTooltips);
-            });
-        }
-        if (this.showQuests) {
-          this.questMarks.forEach((it) => it.remove(this));
-          this.questMarks
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showQuestTooltips);
-            });
-        }
-        if (this.showPlayers) {
-          this.characters.getElements().forEach((it) => it.remove(this));
-          this.characters
-            .getElements()
-            .filter((it) => it.map === this.mapid)
-            .forEach((it) => {
-              it.add(this);
-              it.tooltip(this.showPlayerTooltips);
-            });
-        }
-      }
-    },
-  },
-};
+onBeforeUnmount(() => {
+  clearInterval(intervalId.value);
+  if (themeMedia.value && themeMedia.value.removeEventListener) {
+    themeMedia.value.removeEventListener("change", handleThemeChange);
+  }
+  if (sourceRef.value) {
+    sourceRef.value.close();
+  }
+});
 </script>
 
 <style>
@@ -1079,92 +869,69 @@ export default {
   background: #000;
 }
 
-.leaflet-control {
-  margin: auto !important;
-}
-
-.map-tile {
-  border-bottom: 1px solid #404040;
-  border-right: 1px solid #404040;
-  color: #404040;
-  font-size: 12px;
-}
-
-.map-tile-text {
-  position: absolute;
-  left: 2px;
-  top: 2px;
-  color: #fdb800;
-  font-size: 10px;
-  text-shadow: -1px -1px #000, 1px 1px #000, -1px 1px #000, 1px -1px #000;
-}
-
 .control-panel {
   position: absolute;
-  top: 10%;
-  left: 10px;
-  z-index: 502;
+  top: 10px;
+  right: 10px;
+  z-index: 600;
+  float: right;
+  background: rgba(0, 0, 0, 0.4);
 }
 
-.v-list-item {
-  padding: 0px !important;
-  min-height: 0px !important;
-  margin-left: 0 !important;
-  height: auto !important;
+.control-panel .toggle-wrapper {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
-.v-btn {
-  padding: 0px !important;
+.form-check-input {
+  margin: 0;
+  margin-right: 15px;
+}
+
+.form-group {
+  text-align: left;
+}
+
+.node { }
+
+.side-panel {
+  height: 100%;
+  padding: 12px 10px;
+  overflow-y: auto;
+  background: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .short-btn {
-  min-height: auto !important;
-  height: auto !important;
-  text-transform: none !important;
+  margin-bottom: 10px;
 }
 
-.v-list {
-  padding: 5px !important;
-  height: auto !important;
-  min-height: 0px !important;
+.short-btn:not(:last-child) {
+  margin-bottom: 5px;
 }
 
-.v-navigation-drawer__content {
-  padding: 0px !important;
+.overlay-map-input {
+  margin-bottom: 20px;
 }
 
-.v-navigation-drawer {
-  width: auto !important;
+.hidden {
+  display: none;
 }
 
-.v-text-field__details {
-  min-height: 0px !important;
-  margin: 0px !important;
+.map-tile {
+  height: 100px;
+  width: 100px;
+  border: 1px solid #00000033;
+  background: url("../assets/winter/68_1.png");
 }
 
-.v-messages {
-  min-height: 0px !important;
+.map-tile-text {
+  text-align: center;
+  display: none;
+  color: black;
 }
 
-.v-list-item__content {
-  padding: 0px !important;
-}
-
-.v-input__slot {
-  padding: 0px 5px !important;
-}
-
-.leaflet-tooltip {
-  background-color: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  color: #fdb800 !important;
-  font-size: 10px !important;
-  text-shadow: -1px -1px #000, 1px 1px #000, -1px 1px #000, 1px -1px #000 !important;
-}
-
-.leaflet-tooltip-top:before,
-.leaflet-tooltip-bottom:before,
 .leaflet-tooltip-left:before,
 .leaflet-tooltip-right:before {
   border: none !important;
@@ -1188,13 +955,5 @@ export default {
 
 .hidden {
   display: none;
-}
-
-.side-panel {
-  height: 100%;
-  padding: 12px 10px;
-  overflow-y: auto;
-  background: rgb(var(--v-theme-surface));
-  color: rgb(var(--v-theme-on-surface));
 }
 </style>

@@ -1,7 +1,23 @@
-import { HnHMaxZoom, ImageIcon } from "../utils/LeafletCustomTypes";
 import * as L from "leaflet";
+import { HnHMaxZoom, ImageIcon } from "../utils/leaflet-custom-types";
 
-function detectType(name) {
+export type MarkerType = "quest" | "thingwall" | "custom" | string;
+
+export interface MarkerPosition {
+  x: number;
+  y: number;
+}
+
+export interface MarkerPayload {
+  id: number | string;
+  name: string;
+  position: MarkerPosition;
+  image: string;
+  hidden: boolean;
+  map: number;
+}
+
+function detectType(name: string): MarkerType {
   if (
     name === "gfx/invobjs/small/bush" ||
     name === "gfx/invobjs/small/bumling" ||
@@ -14,14 +30,35 @@ function detectType(name) {
   return idx === -1 ? name : name.substring(name.lastIndexOf("/") + 1);
 }
 
+export interface MapViewContext {
+  map: L.Map;
+  markerLayer: L.LayerGroup;
+  iconScale?: number;
+}
+
 export class Marker {
-  constructor(markerData) {
+  id: number | string;
+  position: MarkerPosition;
+  name: string;
+  image: string;
+  type: MarkerType;
+  marker: L.Marker | null;
+  text: string;
+  value: number | string;
+  hidden: boolean;
+  map: number;
+  onClick: ((ev: L.LeafletMouseEvent) => void) | null;
+  onContext: ((ev: L.LeafletMouseEvent) => void) | null;
+  tstate: boolean;
+  view: L.Map | false;
+
+  constructor(markerData: MarkerPayload) {
     this.id = markerData.id;
     this.position = markerData.position;
     this.name = markerData.name;
     this.image = markerData.image;
     this.type = detectType(this.image);
-    this.marker = false;
+    this.marker = null;
     this.text = this.name;
     this.value = this.id;
     this.hidden = markerData.hidden;
@@ -32,7 +69,7 @@ export class Marker {
     this.view = false;
   }
 
-  remove(mapview) {
+  remove(mapview: MapViewContext) {
     if (this.marker) {
       this.marker.unbindTooltip();
       mapview.map.removeLayer(this.marker);
@@ -42,10 +79,10 @@ export class Marker {
     this.view = false;
   }
 
-  add(mapview) {
+  add(mapview: MapViewContext) {
     this.view = mapview.map;
     if (!this.hidden) {
-      let icon;
+      let icon: ImageIcon;
       const scale = mapview.iconScale || 1;
 
       let isCustom = this.image === "gfx/terobjs/mm/custom";
@@ -74,10 +111,7 @@ export class Marker {
         });
       }
 
-      let position = this.view.unproject(
-        [this.position.x, this.position.y],
-        HnHMaxZoom
-      );
+      let position = this.view.unproject([this.position.x, this.position.y], HnHMaxZoom);
       this.marker = L.marker(position, {
         icon: icon,
         riseOnHover: true /*, title: this.name*/,
@@ -116,16 +150,18 @@ export class Marker {
     }
   }
 
-    resolveIconUrl(path) {
-        if (/^https?:\/\//i.test(path)) {
-            return path;
-        }
-        // Ensure leading slash so URL can resolve with current origin
-        const normalized = path.startsWith('/') ? path : `/${path}`;
-        return new URL(normalized, window.location.origin).href;
+  resolveIconUrl(path: string) {
+    if (/^https?:\/\//i.test(path)) {
+      return path;
     }
+    const normalized = path.startsWith("/") ? path : `/${path}`;
+    if (typeof window === "undefined" || !window.location) {
+      return normalized;
+    }
+    return new URL(normalized, window.location.origin).href;
+  }
 
-  tooltipState(value) {
+  tooltipState(value: boolean) {
     this.tstate = value;
   }
 
@@ -143,45 +179,37 @@ export class Marker {
     }
   }
 
-  tooltip(value) {
-    try {
-      console.log(this.name + " " + value);
-      if (value) this.bindTooltip();
-      else this.unbindTooltip();
-    } catch (e) {
-      console.log(e);
-    }
+  tooltip(value: boolean) {
+    if (value) this.bindTooltip();
+    else this.unbindTooltip();
   }
 
   /**
    * Перемещение к какому-либо маркеру
    * @param map
    */
-  jumpTo(map) {
+  jumpTo(map: L.Map) {
     if (this.marker) {
-      let position = map.unproject(
-        [this.position.x, this.position.y],
-        HnHMaxZoom
-      );
+      let position = map.unproject([this.position.x, this.position.y], HnHMaxZoom);
       this.marker.setLatLng(position);
     }
   }
 
-  setClickCallback(callback) {
+  setClickCallback(callback: (e: L.LeafletMouseEvent) => void) {
     this.onClick = callback;
   }
 
-  callClickCallback(e) {
+  callClickCallback(e: L.LeafletMouseEvent) {
     if (this.onClick != null) {
       this.onClick(e);
     }
   }
 
-  setContextMenu(callback) {
+  setContextMenu(callback: (e: L.LeafletMouseEvent) => void) {
     this.onContext = callback;
   }
 
-  callContextCallback(e) {
+  callContextCallback(e: L.LeafletMouseEvent) {
     if (this.onContext != null) {
       this.onContext(e);
     }

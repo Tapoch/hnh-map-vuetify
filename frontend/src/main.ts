@@ -1,22 +1,22 @@
-import {createApp} from 'vue'
+import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
-import {createVuetify} from './plugins/vuetify'
-import axios from 'axios'
+import { createVuetify } from './plugins/vuetify'
+import axios, { AxiosInstance } from 'axios'
 import './assets/main.css'
 
 export const API_ENDPOINT = `api`;
 
 if (import.meta.env.MODE === 'development') {
     // Start mocks before app creation to avoid hitting proxy/back-end during initial fetches
-    const {startDevMocks} = await import('./mocks/devMocks')
+    const {startDevMocks} = await import('./mocks/dev-mocks')
     startDevMocks()
 }
 
 const app = createApp(App)
 
-const http = axios.create({
-    baseURL: '/map/'
+const http: AxiosInstance = axios.create({
+  baseURL: '/map/'
 });
 
 app.config.globalProperties.$http = http;
